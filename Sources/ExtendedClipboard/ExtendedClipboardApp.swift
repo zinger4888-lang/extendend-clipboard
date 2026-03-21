@@ -715,12 +715,12 @@ enum AccessibilityLocator {
 
         let focused = unsafeDowncast(focusedValue, to: AXUIElement.self)
 
-        if let caretRect = caretRect(for: focused) {
-            return convertToAppKitCoordinates(caretRect)
+        if let caretRect = usableCaretRect(for: focused) {
+            return caretRect
         }
 
-        if let elementRect = elementRect(for: focused) {
-            return convertToAppKitCoordinates(elementRect)
+        if let elementRect = usableElementRect(for: focused) {
+            return elementRect
         }
 
         return nil
@@ -764,6 +764,15 @@ enum AccessibilityLocator {
         return rect
     }
 
+    private static func usableCaretRect(for element: AXUIElement) -> CGRect? {
+        guard let rect = caretRect(for: element),
+              isUsableCaretRect(rect) else {
+            return nil
+        }
+
+        return convertToAppKitCoordinates(rect)
+    }
+
     private static func elementRect(for element: AXUIElement) -> CGRect? {
         guard let position = pointAttribute(kAXPositionAttribute as CFString, from: element),
               let size = sizeAttribute(kAXSizeAttribute as CFString, from: element) else {
@@ -771,6 +780,15 @@ enum AccessibilityLocator {
         }
 
         return CGRect(origin: position, size: size)
+    }
+
+    private static func usableElementRect(for element: AXUIElement) -> CGRect? {
+        guard let rect = elementRect(for: element),
+              isUsableElementRect(rect) else {
+            return nil
+        }
+
+        return convertToAppKitCoordinates(rect)
     }
 
     private static func pointAttribute(_ attribute: CFString, from element: AXUIElement) -> CGPoint? {
@@ -838,6 +856,34 @@ enum AccessibilityLocator {
             width: rect.size.width,
             height: rect.size.height
         )
+    }
+
+    private static func isUsableCaretRect(_ rect: CGRect) -> Bool {
+        guard rect.origin.x.isFinite,
+              rect.origin.y.isFinite,
+              rect.size.width.isFinite,
+              rect.size.height.isFinite else {
+            return false
+        }
+
+        guard rect.origin.x >= 0,
+              rect.origin.y >= 0 else {
+            return false
+        }
+
+        // Browsers often report a zero-height rect for the URL field caret.
+        return rect.height >= 4
+    }
+
+    private static func isUsableElementRect(_ rect: CGRect) -> Bool {
+        guard rect.origin.x.isFinite,
+              rect.origin.y.isFinite,
+              rect.size.width.isFinite,
+              rect.size.height.isFinite else {
+            return false
+        }
+
+        return rect.width >= 20 && rect.height >= 12
     }
 }
 
