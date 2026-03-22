@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 private enum ClipboardMenuDisplay {
     static let primaryLimit = 10
     static let secondaryLimit = 20
+    static let estimatedItemHeight: CGFloat = 24
+    static let estimatedMenuPadding: CGFloat = 18
 }
 
 @main
@@ -93,6 +95,9 @@ struct ClipboardMenu: View {
                 NSApplication.shared.terminate(nil)
             }
         }
+        .onAppear {
+            coordinator.refreshAccessStatus()
+        }
     }
 
     private func menuTitle(for item: ClipboardItem, index: Int) -> String {
@@ -120,6 +125,8 @@ struct ClipboardMenu: View {
             "Order: Top to Bottom"
         case .oldestFirst:
             "Order: Bottom to Top"
+        case .automatic:
+            "Order: Auto"
         }
     }
 }
@@ -189,7 +196,7 @@ final class ClipboardCoordinator: ObservableObject {
             return
         }
 
-        let anchor = AccessibilityLocator.caretOrFocusedRect() ?? AccessibilityLocator.mouseAnchorRect()
+        let anchor = AccessibilityLocator.bestAvailableAnchorRect()
         NSApp.activate(ignoringOtherApps: true)
         popupMenuController.present(anchoredTo: anchor)
     }
@@ -345,13 +352,12 @@ final class ClipboardPopupMenuController: NSObject {
     }
 
     func present(anchoredTo anchorRect: CGRect) {
-        let menu = buildMenu()
+        let presentation = contextMenuPresentation(using: anchorRect)
+        let menu = buildMenu(opensUpward: presentation.opensUpward)
         currentMenu = menu
         didTriggerSelection = false
 
-        let popupPoint = NSPoint(x: anchorRect.minX, y: anchorRect.maxY)
-        let initialItem = menu.items.first
-        menu.popUp(positioning: initialItem, at: popupPoint, in: nil)
+        menu.popUp(positioning: menu.items.first, at: presentation.point, in: nil)
 
         currentMenu = nil
 
@@ -365,11 +371,37 @@ final class ClipboardPopupMenuController: NSObject {
         currentMenu = nil
     }
 
-    private func buildMenu() -> NSMenu {
+    private struct PopupPresentation {
+        let point: NSPoint
+        let opensUpward: Bool
+    }
+
+    private func contextMenuPresentation(using anchorRect: CGRect) -> PopupPresentation {
+        let mouse = NSEvent.mouseLocation
+        let anchorDistance = hypot(anchorRect.midX - mouse.x, anchorRect.midY - mouse.y)
+        let point: NSPoint
+        let opensUpward: Bool
+
+        if anchorDistance <= 24 {
+            point = NSPoint(x: mouse.x + 3, y: mouse.y + 1)
+            opensUpward = shouldOpenUpward(near: mouse)
+        } else {
+            let anchorPoint = CGPoint(x: anchorRect.maxX, y: anchorRect.midY)
+            point = NSPoint(x: anchorRect.maxX + 3, y: anchorRect.midY)
+            opensUpward = shouldOpenUpward(near: anchorPoint)
+        }
+
+        return PopupPresentation(
+            point: point,
+            opensUpward: opensUpward
+        )
+    }
+
+    private func buildMenu(opensUpward: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        let orderedItems = preferences.sortedItems(from: store.items)
+        let orderedItems = preferences.sortedPopupItems(from: store.items, opensUpward: opensUpward)
 
         for (index, item) in orderedItems.prefix(ClipboardMenuDisplay.primaryLimit).enumerated() {
             menu.addItem(makeClipboardMenuItem(for: item, index: index))
@@ -399,6 +431,24 @@ final class ClipboardPopupMenuController: NSObject {
         }
 
         return menu
+    }
+
+    private func shouldOpenUpward(near point: CGPoint) -> Bool {
+        guard let screen = NSScreen.screenContaining(CGRect(origin: point, size: .zero)) ?? NSScreen.main else {
+            return false
+        }
+
+        let availableBelow = point.y - screen.visibleFrame.minY
+        return availableBelow < estimatedMenuHeight() + 8
+    }
+
+    private func estimatedMenuHeight() -> CGFloat {
+        let primaryCount = min(store.items.count, ClipboardMenuDisplay.primaryLimit)
+        let hasOverflow = store.items.count > ClipboardMenuDisplay.primaryLimit
+        let visibleItemCount = primaryCount + (hasOverflow ? 1 : 0)
+
+        return CGFloat(visibleItemCount) * ClipboardMenuDisplay.estimatedItemHeight
+            + ClipboardMenuDisplay.estimatedMenuPadding
     }
 
     private func makeClipboardMenuItem(for item: ClipboardItem, index: Int) -> NSMenuItem {
@@ -442,7 +492,14 @@ final class ClipboardPreferences: ObservableObject {
     }
 
     func toggleSortOrder() {
-        sortOrder = sortOrder == .newestFirst ? .oldestFirst : .newestFirst
+        switch sortOrder {
+        case .newestFirst:
+            sortOrder = .oldestFirst
+        case .oldestFirst:
+            sortOrder = .automatic
+        case .automatic:
+            sortOrder = .newestFirst
+        }
     }
 
     func sortedItems(from items: [ClipboardItem]) -> [ClipboardItem] {
@@ -451,6 +508,19 @@ final class ClipboardPreferences: ObservableObject {
             return items
         case .oldestFirst:
             return items.reversed()
+        case .automatic:
+            return items
+        }
+    }
+
+    func sortedPopupItems(from items: [ClipboardItem], opensUpward: Bool) -> [ClipboardItem] {
+        switch sortOrder {
+        case .newestFirst:
+            return items
+        case .oldestFirst:
+            return items.reversed()
+        case .automatic:
+            return opensUpward ? items.reversed() : items
         }
     }
 }
@@ -458,6 +528,7 @@ final class ClipboardPreferences: ObservableObject {
 enum ClipboardSortOrder: String {
     case newestFirst
     case oldestFirst
+    case automatic
 }
 
 final class PasteHotkeyMonitor {
@@ -703,6 +774,25 @@ enum ClipboardPayloadKind {
 }
 
 enum AccessibilityLocator {
+    private static let maximumPointerDistanceForAccessibilityAnchor: CGFloat = 180
+
+    static func bestAvailableAnchorRect() -> CGRect {
+        let mouseRect = mouseAnchorRect()
+
+        guard let anchorRect = caretOrFocusedRect() else {
+            return mouseRect
+        }
+
+        let mousePoint = CGPoint(x: mouseRect.midX, y: mouseRect.midY)
+        let anchorPoint = CGPoint(x: anchorRect.midX, y: anchorRect.midY)
+
+        if hypot(anchorPoint.x - mousePoint.x, anchorPoint.y - mousePoint.y) > maximumPointerDistanceForAccessibilityAnchor {
+            return mouseRect
+        }
+
+        return anchorRect
+    }
+
     static func caretOrFocusedRect() -> CGRect? {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedValue: CFTypeRef?
@@ -714,12 +804,20 @@ enum AccessibilityLocator {
         }
 
         let focused = unsafeDowncast(focusedValue, to: AXUIElement.self)
+        let rawCaretRect = caretRect(for: focused)
+        let caretRect = rawCaretRect.flatMap(usableRect(fromCaretRect:))
 
-        if let caretRect = usableCaretRect(for: focused) {
+        if let caretRect {
             return caretRect
         }
 
-        if let elementRect = usableElementRect(for: focused) {
+        if let inferredCaretRect = inferredCaretRect(for: focused) {
+            return inferredCaretRect
+        }
+
+        let elementRect = elementRect(for: focused).flatMap(usableRect(fromElementRect:))
+
+        if let elementRect {
             return elementRect
         }
 
@@ -764,9 +862,8 @@ enum AccessibilityLocator {
         return rect
     }
 
-    private static func usableCaretRect(for element: AXUIElement) -> CGRect? {
-        guard let rect = caretRect(for: element),
-              isUsableCaretRect(rect) else {
+    private static func usableRect(fromCaretRect rect: CGRect) -> CGRect? {
+        guard isUsableCaretRect(rect) else {
             return nil
         }
 
@@ -782,13 +879,47 @@ enum AccessibilityLocator {
         return CGRect(origin: position, size: size)
     }
 
-    private static func usableElementRect(for element: AXUIElement) -> CGRect? {
-        guard let rect = elementRect(for: element),
-              isUsableElementRect(rect) else {
+    private static func usableRect(fromElementRect rect: CGRect) -> CGRect? {
+        guard isUsableElementRect(rect) else {
             return nil
         }
 
         return convertToAppKitCoordinates(rect)
+    }
+
+    private static func inferredCaretRect(for element: AXUIElement) -> CGRect? {
+        guard let selectedRange = selectedTextRange(for: element) else {
+            return nil
+        }
+
+        let textLength = textLength(for: element)
+
+        if selectedRange.length > 0,
+           let nextRect = characterRect(
+                at: selectedRange.location,
+                textLength: textLength,
+                in: element
+           ) {
+            return collapsedRect(atX: nextRect.minX, basedOn: nextRect)
+        }
+
+        if let nextRect = characterRect(
+            at: selectedRange.location,
+            textLength: textLength,
+            in: element
+        ) {
+            return collapsedRect(atX: nextRect.minX, basedOn: nextRect)
+        }
+
+        if let previousRect = characterRect(
+            at: selectedRange.location - 1,
+            textLength: textLength,
+            in: element
+        ) {
+            return collapsedRect(atX: previousRect.maxX, basedOn: previousRect)
+        }
+
+        return nil
     }
 
     private static func pointAttribute(_ attribute: CFString, from element: AXUIElement) -> CGPoint? {
@@ -833,6 +964,82 @@ enum AccessibilityLocator {
         }
 
         return size
+    }
+
+    private static func selectedTextRange(for element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+              let value,
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = unsafeDowncast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cfRange else {
+            return nil
+        }
+
+        var range = CFRange()
+        guard AXValueGetValue(axValue, .cfRange, &range) else {
+            return nil
+        }
+
+        return range
+    }
+
+    private static func textLength(for element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+              let value,
+              CFGetTypeID(value) == CFStringGetTypeID(),
+              let stringValue = value as? String else {
+            return nil
+        }
+
+        return (stringValue as NSString).length
+    }
+
+    private static func characterRect(at location: Int, textLength: Int?, in element: AXUIElement) -> CGRect? {
+        guard location >= 0 else {
+            return nil
+        }
+
+        if let textLength, location >= textLength {
+            return nil
+        }
+
+        var range = CFRange(location: location, length: 1)
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else {
+            return nil
+        }
+
+        var boundsValue: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXBoundsForRangeParameterizedAttribute as CFString,
+            rangeValue,
+            &boundsValue
+        ) == .success,
+        let boundsValue,
+        CFGetTypeID(boundsValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = unsafeDowncast(boundsValue, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgRect else {
+            return nil
+        }
+
+        var rect = CGRect.zero
+        guard AXValueGetValue(axValue, .cgRect, &rect) else {
+            return nil
+        }
+
+        return usableRect(fromCaretRect: rect)
+    }
+
+    private static func collapsedRect(atX x: CGFloat, basedOn rect: CGRect) -> CGRect {
+        CGRect(x: x, y: rect.origin.y, width: 0, height: rect.height)
     }
 
     private static func convertToAppKitCoordinates(_ rect: CGRect) -> CGRect {

@@ -2,6 +2,8 @@
 
 Extended Clipboard is a native macOS menubar app that keeps a short history of copied text and shows a system-style popup next to the active input when you press `Cmd+V`.
 
+It currently targets only the latest supported macOS generation for this project, starting from macOS 13.
+
 ## Features
 
 - menubar app with clipboard history for text items;
